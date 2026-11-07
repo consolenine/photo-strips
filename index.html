@@ -104,7 +104,7 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
     <div class="seg" id="alignSeg"></div>
     <label class="check"><input type="checkbox" id="cutToggle"> Cutting lines <span>(dotted)</span></label>
     <div class="row"><label title="Space your printer can't print on. Everything stays inside it.">Printer margin</label><input type="range" id="printMargin" min="0" max="15" step="0.5"><output id="printMarginV"></output></div>
-    <p class="note" style="margin-top:0">Keeps photos and cut lines inside the area your printer can print. 5–6 mm suits most inkjets; raise it if lines get cut off.</p>
+    <p class="note" style="margin-top:0">Space kept clear at the top and sides. The bottom cut line always sits at the very bottom of the page, 2 px above the edge.</p>
     <span class="lbl">Caption under each strip (optional)</span>
     <input type="text" id="caption" maxlength="40" placeholder="e.g. RAHUL &amp; PRIYA · 07.11.26">
     <div class="btns" style="margin-top:10px">
@@ -186,6 +186,7 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
 const PAGE = { w: 842, h: 595 };
 const FR = { w: 186, h: 123.5, gap: 7.5 };                // full-size frame (pt); shrinks only if the printer margin needs it
 const MIN_FOOTER = 22;                                    // minimum room below the photos for the caption (pt)
+const BOTTOM_CUT = 1.5;                                   // bottom cut line sits 2 px (1.5 pt) above the page's bottom edge
 const CUT_LINE = { width: .75, dash: [.75, 1.5], opacity: .2 };   // 1 px dotted, 20% (pt)
 const ASPECT = FR.w / FR.h;
 const EXPORT_PPI = 300;
@@ -251,18 +252,18 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 // ============================================================================
 // Everything (photos and cut lines) stays inside the printer margin ("safe area").
 // Each strip: cut line at the top of the safe area, equal margins on the top and sides,
-// and a footer (for the caption) that runs down to the bottom of the safe area.
+// and a footer (for the caption) that runs down to 2 px above the bottom of the page.
 // Frames shrink only when a large printer margin leaves too little room for 4 strips.
 function geom() {
   const safe = state.printMargin * 72 / 25.4;
-  const availW = PAGE.w - 2 * safe, availH = PAGE.h - 2 * safe;
+  const availW = PAGE.w - 2 * safe, availH = PAGE.h - safe - BOTTOM_CUT;
   const k = Math.min(1, availW / (4 * (FR.w + 2 * FR.gap)),
                         availH / (4 * FR.h + 3 * FR.gap + FR.gap + MIN_FOOTER));
   const fw = FR.w * k, fh = FR.h * k, gap = FR.gap * k, cut = gap, pitch = fw + 2 * cut;
   const n = state.strips, boxW = n * pitch;
   const side = (PAGE.w - 4 * pitch) / 2;
   const left = state.align === "left" ? side : state.align === "right" ? PAGE.w - side - boxW : (PAGE.w - boxW) / 2;
-  const top = safe, bottom = PAGE.h - safe, frameTop = top + cut;
+  const top = safe, bottom = PAGE.h - BOTTOM_CUT, frameTop = top + cut;
   const footerTop = frameTop + 4 * fh + 3 * gap;
   return { k, fw, fh, gap, cut, pitch, left, top, bottom, boxW, frameTop,
            capY: (footerTop + bottom) / 2 + CAP_SIZE * .35 };
@@ -1059,7 +1060,7 @@ $("pdfBtn").onclick = async () => {
     const frames = [];
     for (const f of list) frames.push({ rect: f.rect, w: f.w, h: f.h, bytes: new Uint8Array(await (await toJpeg(f.canvas)).arrayBuffer()) });
     download(makePDF(frames, captionItems()), `photo-strips-${stamp()}.pdf`);
-    setExportStatus("PDF downloaded. In the print dialog pick A4, landscape and \"Actual size\" / 100% (not \"Fit\"): the printer margin is already built in." + emptyNote(empty), "ok");
+    setExportStatus("PDF downloaded (A4 landscape)." + emptyNote(empty), "ok");
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
 };
@@ -1104,7 +1105,7 @@ $("printBtn").onclick = async () => {
     for (const x of cl.xs) { const l = document.createElement("div"); l.className = "cut v"; l.style.left = x + "pt"; box.appendChild(l); }
     for (const y of cl.ys) { const l = document.createElement("div"); l.className = "cut h"; l.style.top = y + "pt"; box.appendChild(l); }
     await Promise.all(loads);
-    setExportStatus("In the print dialog choose A4, landscape, scale 100% and margins \"None\": the printer margin is already built in." + emptyNote(empty), "ok");
+    setExportStatus("In the print dialog choose A4, landscape." + emptyNote(empty), "ok");
     window.print();
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
