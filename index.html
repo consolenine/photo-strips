@@ -22,6 +22,7 @@ section{border-top:1px solid var(--line);padding:14px 0 6px}
 section h2{font-size:11px;font-weight:650;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}
 .seg{display:flex;background:var(--chip);border-radius:8px;padding:2px;gap:2px;margin-bottom:10px}
 .seg button{flex:1;border:0;background:transparent;padding:6px 4px;border-radius:6px;font:inherit;color:var(--ink);cursor:pointer;white-space:nowrap}
+.seg button:disabled{color:#bdb7ae;cursor:default}
 .seg button.on{background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.12);font-weight:600}
 .lbl{display:block;color:var(--muted);font-size:12px;margin:2px 0 5px}
 .row{display:grid;grid-template-columns:92px 1fr 42px;align-items:center;gap:8px;margin:3px 0}
@@ -98,7 +99,7 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
 
   <section>
     <h2>Layout</h2>
-    <span class="lbl">Page size (landscape)</span>
+    <span class="lbl">Page size</span>
     <div class="seg" id="pageSeg"></div>
     <span class="lbl">Number of strips</span>
     <div class="seg" id="stripsSeg"></div>
@@ -185,7 +186,9 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
 // ============================================================================
 // Geometry (PDF points, landscape) — frame proportions measured from the sample A4 sheet
 // ============================================================================
-const PAGES = { A4: { w: 842, h: 595 }, A5: { w: 595.28, h: 419.53 } };
+// A5 is portrait: exactly half of the A4 sheet, so its 2 strips print at (almost) the same size as on A4
+const PAGES = { A4: { w: 842, h: 595, orient: "landscape", maxStrips: 4 },
+                A5: { w: 419.53, h: 595.28, orient: "portrait", maxStrips: 2 } };
 let PAGE = PAGES.A4;                                      // set from state.page (A4 or A5); frames scale to fit
 const FR = { w: 186, h: 123.5, gap: 7.5 };                // full-size frame (pt); shrinks only if the printer margin needs it
 const MIN_FOOTER = 22;                                    // minimum room below the photos for the caption (pt)
@@ -260,11 +263,11 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 function geom() {
   const safe = state.printMargin * 72 / 25.4;
   const availW = PAGE.w - 2 * safe, availH = PAGE.h - safe - BOTTOM_CUT;
-  const k = Math.min(1, availW / (4 * (FR.w + 2 * FR.gap)),
+  const k = Math.min(1, availW / (PAGE.maxStrips * (FR.w + 2 * FR.gap)),
                         availH / (4 * FR.h + 3 * FR.gap + FR.gap + MIN_FOOTER));
   const fw = FR.w * k, fh = FR.h * k, gap = FR.gap * k, cut = gap, pitch = fw + 2 * cut;
   const n = state.strips, boxW = n * pitch;
-  const side = (PAGE.w - 4 * pitch) / 2;
+  const side = (PAGE.w - PAGE.maxStrips * pitch) / 2;
   const left = state.align === "left" ? side : state.align === "right" ? PAGE.w - side - boxW : (PAGE.w - boxW) / 2;
   const top = safe, bottom = PAGE.h - BOTTOM_CUT, frameTop = top + cut;
   const footerTop = frameTop + 4 * fh + 3 * gap;
@@ -885,27 +888,30 @@ document.addEventListener("keydown", e => {
 // ============================================================================
 // Controls
 // ============================================================================
-function segmented(id, options, get, set) {
+function segmented(id, options, get, set, isDisabled = () => false) {
   const box = $(id);
   const draw = () => { box.innerHTML = "";
     for (const [val, label] of options) {
       const b = document.createElement("button"); b.textContent = label; b.className = get() === val ? "on" : "";
+      b.disabled = isDisabled(val); if (b.disabled) b.title = "Not available on this page size";
       b.onclick = () => { set(val); draw(); }; box.appendChild(b);
     } };
   draw(); return draw;
 }
 function applyPage() {
   PAGE = PAGES[state.page];
-  $("pageStyle").textContent = `@page{size:${state.page} landscape;margin:0}
+  state.strips = Math.min(state.strips, PAGE.maxStrips);
+  if (state.selected >= 0 && !visibleSlots().includes(state.selected)) select(-1);
+  $("pageStyle").textContent = `@page{size:${state.page} ${PAGE.orient};margin:0}
     @media print{#print{width:${PAGE.w}pt;height:${PAGE.h}pt}}`;
   $("exportHead").textContent = `Export · ${state.page}, 300 ppi`;
 }
 applyPage();
-segmented("pageSeg", [["A4", "A4"], ["A5", "A5"]], () => state.page, v => {
-  state.page = v; applyPage(); buildSheet(); saveSettings(); });
-segmented("stripsSeg", [[1, "1"], [2, "2"], [3, "3"], [4, "4"]], () => state.strips, v => {
+segmented("pageSeg", [["A4", "A4 · 4 strips"], ["A5", "A5 · 2 strips"]], () => state.page, v => {
+  state.page = v; applyPage(); drawStrips(); buildSheet(); saveSettings(); });
+const drawStrips = segmented("stripsSeg", [[1, "1"], [2, "2"], [3, "3"], [4, "4"]], () => state.strips, v => {
   state.strips = v; if (state.selected >= 0 && !visibleSlots().includes(state.selected)) select(-1);
-  buildSheet(); saveSettings(); });
+  buildSheet(); saveSettings(); }, v => v > PAGE.maxStrips);
 segmented("alignSeg", [["left", "Left"], ["center", "Centre"], ["right", "Right"]], () => state.align, v => {
   state.align = v; buildSheet(); saveSettings(); });
 const drawBgSeg = segmented("bgSeg", [["color", "Colour"], ["select", "People colour, BG B&W"], ["mono", "All B&W"]], () => state.S.bg, v => {
@@ -1072,7 +1078,7 @@ $("pdfBtn").onclick = async () => {
     const frames = [];
     for (const f of list) frames.push({ rect: f.rect, w: f.w, h: f.h, bytes: new Uint8Array(await (await toJpeg(f.canvas)).arrayBuffer()) });
     download(makePDF(frames, captionItems()), `photo-strips-${state.page}-${stamp()}.pdf`);
-    setExportStatus(`PDF downloaded (${state.page} landscape).` + emptyNote(empty), "ok");
+    setExportStatus(`PDF downloaded (${state.page} ${PAGE.orient}).` + emptyNote(empty), "ok");
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
 };
@@ -1117,7 +1123,7 @@ $("printBtn").onclick = async () => {
     for (const x of cl.xs) { const l = document.createElement("div"); l.className = "cut v"; l.style.left = x + "pt"; box.appendChild(l); }
     for (const y of cl.ys) { const l = document.createElement("div"); l.className = "cut h"; l.style.top = y + "pt"; box.appendChild(l); }
     await Promise.all(loads);
-    setExportStatus(`In the print dialog choose ${state.page}, landscape.` + emptyNote(empty), "ok");
+    setExportStatus(`In the print dialog choose ${state.page}, ${PAGE.orient}.` + emptyNote(empty), "ok");
     window.print();
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
