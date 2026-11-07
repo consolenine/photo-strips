@@ -143,6 +143,11 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
       <button class="btn" id="zeroEdits">No edits</button>
       <button class="btn" id="compare" title="Hold to see the photos without edits">Hold: original</button>
     </div>
+    <div class="btns" style="margin:0 0 4px">
+      <button class="btn" id="applyMine" title="Apply your saved preset">My preset</button>
+      <button class="btn" id="saveMine" title="Save the current edits and background settings as your preset">Save as my preset</button>
+    </div>
+    <p class="note" id="mineNote"></p>
     <p class="note">Double-click a slider name to reset it.</p>
   </section>
 
@@ -884,7 +889,7 @@ segmented("stripsSeg", [[1, "1"], [2, "2"], [3, "3"], [4, "4"]], () => state.str
   buildSheet(); saveSettings(); });
 segmented("alignSeg", [["left", "Left"], ["center", "Centre"], ["right", "Right"]], () => state.align, v => {
   state.align = v; buildSheet(); saveSettings(); });
-segmented("bgSeg", [["color", "Colour"], ["select", "People colour, BG B&W"], ["mono", "All B&W"]], () => state.S.bg, v => {
+const drawBgSeg = segmented("bgSeg", [["color", "Colour"], ["select", "People colour, BG B&W"], ["mono", "All B&W"]], () => state.S.bg, v => {
   state.S.bg = v; segmentAllIfNeeded(); updateSegStatus(); allPhotos().forEach(p => markBusy(p)); scheduleRender(0); saveSettings(); });
 segmented("paperSeg", [["glossy", "Glossy"], ["matte", "Matte"], ["screen", "Screen only"]], () => state.S.paper, v => {
   state.S.paper = v; $("paperNote").textContent = PAPER[v].note; scheduleRender(0); saveSettings(); });
@@ -913,6 +918,37 @@ function syncSliders() {
 $("resetEdits").onclick = () => { for (const k in NEUTRAL) state.S[k] = DEFAULTS[k];
   state.S.bgExposure = DEFAULTS.bgExposure; state.S.bgContrast = DEFAULTS.bgContrast; syncSliders(); scheduleRender(0); saveSettings(); };
 $("zeroEdits").onclick = () => { Object.assign(state.S, NEUTRAL); syncSliders(); scheduleRender(0); saveSettings(); };
+
+// ---- One custom preset, kept in this browser (localStorage) -----------------
+const PRESET_KEY = "photostrips-my-preset";
+const PRESET_FIELDS = [...Object.keys(NEUTRAL), "bg", "bgExposure", "bgContrast"];
+function loadMine() {
+  try { const v = JSON.parse(localStorage.getItem(PRESET_KEY) || "null"); return v && v.values ? v : null; } catch { return null; }
+}
+function updateMineUI() {
+  const m = loadMine();
+  $("applyMine").disabled = !m;
+  $("mineNote").textContent = m
+    ? `My preset saved ${new Date(m.saved).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}. It includes the edits and background settings, kept in this browser only.`
+    : "Set the sliders and background how you like, then save them as your preset.";
+}
+function flash(btn, text) {
+  const old = btn.dataset.label || btn.textContent; btn.dataset.label = old;
+  btn.textContent = text; clearTimeout(btn._t); btn._t = setTimeout(() => btn.textContent = old, 1400);
+}
+$("saveMine").onclick = () => {
+  const values = {}; for (const k of PRESET_FIELDS) values[k] = state.S[k];
+  try { localStorage.setItem(PRESET_KEY, JSON.stringify({ values, saved: Date.now() })); flash($("saveMine"), "Saved ✓"); }
+  catch { flash($("saveMine"), "Couldn't save"); }
+  updateMineUI();
+};
+$("applyMine").onclick = () => {
+  const m = loadMine(); if (!m) return;
+  for (const k of PRESET_FIELDS) if (k in m.values) state.S[k] = m.values[k];
+  syncSliders(); drawBgSeg(); segmentAllIfNeeded(); updateSegStatus(); allPhotos().forEach(p => markBusy(p));
+  scheduleRender(0); saveSettings(); flash($("applyMine"), "Applied ✓");
+};
+updateMineUI();
 const cmp = $("compare");
 const cmpOn = () => { state.original = true; scheduleRender(0); };
 const cmpOff = () => { if (state.original) { state.original = false; scheduleRender(0); } };
