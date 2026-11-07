@@ -109,12 +109,13 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
       <button class="btn" id="addMany">Add photos…</button>
       <button class="btn" id="clearAll">Clear all</button>
     </div>
-    <p class="note">Click a frame to add a photo, or drop photos on it. Drag a photo to reposition it and scroll to zoom.</p>
+    <p class="note">Click a frame to add a photo, or drop photos on it. Drag a photo to reposition it and scroll to zoom. JPEG, PNG and camera RAW files work.</p>
   </section>
 
   <section id="photoPanel" hidden>
     <h2>Selected photo</h2>
     <div class="pname" id="pName"></div>
+    <div class="note" id="pNote" style="margin:-4px 0 8px"></div>
     <div class="row"><label>Zoom</label><input type="range" id="pZoom" min="1" max="4" step="0.01"><output id="pZoomV"></output></div>
     <div class="row"><label>Exposure ±</label><input type="range" id="pEv" min="-2" max="2" step="0.05"><output id="pEvV"></output></div>
     <div class="btns" style="margin:8px 0 4px">
@@ -169,7 +170,7 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
 </main>
 
 <div id="print"></div>
-<input type="file" id="fileInput" accept="image/*" multiple hidden>
+<input type="file" id="fileInput" multiple hidden>
 
 <script type="module">
 // ============================================================================
@@ -561,24 +562,125 @@ function updateSegStatus() {
 // ============================================================================
 let uid = 0;
 const allPhotos = () => state.slots.filter(Boolean);
+// ---- RAW support -------------------------------------------------------------
+// Browsers can't decode RAW sensor data, but almost every RAW file (CR2, CR3, NEF,
+// ARW, RAF, ORF, RW2, DNG, PEF…) carries the camera's own full-size JPEG inside.
+// We find the largest one and apply the orientation stored in the RAW file.
+const RAW_EXT = /\.(cr2|cr3|crw|nef|nrw|arw|srf|sr2|raf|orf|rw2|pef|dng|srw|x3f|3fr|iiq|erf|kdc|dcr|mrw|raw|rwl|mef|mos)$/i;
+const RAW_ACCEPT = ".cr2,.cr3,.crw,.nef,.nrw,.arw,.srf,.sr2,.raf,.orf,.rw2,.pef,.dng,.srw,.x3f,.3fr,.iiq,.erf,.kdc,.dcr,.mrw,.raw,.rwl,.mef,.mos";
+
+function tiffOrientation(u8, t) {               // t = start of a TIFF header ("II*\0" / "MM\0*" and RAW variants)
+  if (t < 0 || t + 8 > u8.length) return 0;
+  const le = u8[t] === 0x49 && u8[t + 1] === 0x49, be = u8[t] === 0x4D && u8[t + 1] === 0x4D;
+  if (!le && !be) return 0;
+  const r16 = o => le ? u8[o] | u8[o + 1] << 8 : u8[o] << 8 | u8[o + 1];
+  const r32 = o => (le ? (u8[o] | u8[o + 1] << 8 | u8[o + 2] << 16 | u8[o + 3] << 24)
+                       : (u8[o] << 24 | u8[o + 1] << 16 | u8[o + 2] << 8 | u8[o + 3])) >>> 0;
+  const ifd = t + r32(t + 4);
+  if (ifd + 2 > u8.length) return 0;
+  const n = r16(ifd);
+  for (let k = 0; k < n && ifd + 2 + k * 12 + 12 <= u8.length; k++) {
+    const e = ifd + 2 + k * 12;
+    if (r16(e) === 0x0112) { const v = r16(e + 8); return v >= 1 && v <= 8 ? v : 0; }
+  }
+  return 0;
+}
+
+// Parse a JPEG starting at s: size, kind of SOF, EXIF orientation and where it ends
+function parseJpeg(u8, s) {
+  const n = u8.length;
+  let p = s + 2, w = 0, h = 0, sof = 0, orient = 0;
+  while (p + 4 <= n) {
+    if (u8[p] !== 0xFF) return null;
+    const m = u8[p + 1];
+    if (m === 0xFF) { p++; continue; }
+    if (m === 0x01 || (m >= 0xD0 && m <= 0xD7)) { p += 2; continue; }
+    if (m === 0xD8 || m === 0xD9) return null;
+    const len = u8[p + 2] << 8 | u8[p + 3];
+    if (len < 2) return null;
+    if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC && !sof) {
+      sof = m; h = u8[p + 5] << 8 | u8[p + 6]; w = u8[p + 7] << 8 | u8[p + 8];
+    }
+    if (m === 0xE1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66)
+      orient = tiffOrientation(u8, p + 10);                         // "Exif\0\0" + TIFF
+    if (m === 0xDA) {                                              // scan compressed data for the end marker
+      let q = p + 2 + len;
+      while (q < n - 1) {
+        if (u8[q] !== 0xFF) { q++; continue; }
+        const b = u8[q + 1];
+        if (b === 0xD9) return { start: s, end: q + 2, w, h, sof, orient };
+        if (b === 0x00 || b === 0xFF || (b >= 0xD0 && b <= 0xD7)) { q += b === 0xFF ? 1 : 2; continue; }
+        if (b >= 0xC0 && q + 3 < n) { q += 2 + (u8[q + 2] << 8 | u8[q + 3]); continue; }  // next scan (progressive)
+        q += 2;
+      }
+      return null;
+    }
+    p += 2 + len;
+  }
+  return null;
+}
+
+async function rawPreview(file) {
+  const u8 = new Uint8Array(await file.arrayBuffer());
+  let best = null;
+  for (let i = 0, n = u8.length - 3; i < n; i++) {
+    if (u8[i] !== 0xFF || u8[i + 1] !== 0xD8 || u8[i + 2] !== 0xFF) continue;
+    const j = parseJpeg(u8, i);
+    if (!j) continue;
+    // ordinary (baseline/progressive) JPEGs only: the RAW sensor data itself is often "lossless JPEG"
+    if ((j.sof === 0xC0 || j.sof === 0xC1 || j.sof === 0xC2) && j.w && j.h && (!best || j.w * j.h > best.w * best.h)) best = j;
+    i = j.end - 1;
+  }
+  if (!best || Math.max(best.w, best.h) < 600)
+    throw new Error(`${file.name}: this RAW file has no usable full-size preview inside it` +
+      (best ? ` (only ${best.w}×${best.h})` : "") + ". Export it as JPEG first.");
+  // orientation: the preview's own EXIF if it has one, otherwise the RAW file's
+  let orient = 0;
+  if (best.orient <= 1) {
+    let t = -1;
+    const h4 = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+    if (/^(II\*\0|MM\0\*|IIRO|IIRS|MMOR|IIU\0)$/.test(h4)) t = 0;                       // TIFF-based RAWs
+    else {                                                                              // Canon CR3: TIFF inside the CMT1 box
+      const head = u8.subarray(0, Math.min(u8.length, 1 << 16));
+      for (let k = 0; k < head.length - 4; k++)
+        if (head[k] === 0x43 && head[k + 1] === 0x4D && head[k + 2] === 0x54 && head[k + 3] === 0x31) { t = k + 4; break; }
+    }
+    orient = tiffOrientation(u8, t);
+  }
+  return { blob: new Blob([u8.subarray(best.start, best.end)], { type: "image/jpeg" }), orient, w: best.w, h: best.h };
+}
+
 async function loadPhoto(file) {
-  let bmp;
-  try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); }
-  catch { throw new Error(`${file.name}: this browser can't open this file type` +
-    (/\.hei[cf]$/i.test(file.name) ? " (HEIC: export it as JPEG first, or use Safari)" : "")); }
+  let bmp, orient = 0, note = "";
+  try {
+    if (RAW_EXT.test(file.name)) {
+      const r = await rawPreview(file);
+      bmp = await createImageBitmap(r.blob, { imageOrientation: "from-image" });
+      orient = r.orient > 1 ? r.orient : 0;
+      note = `RAW · camera preview ${r.w}×${r.h}`;
+    } else bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch (e) {
+    if (RAW_EXT.test(file.name) && e.message && e.message.startsWith(file.name)) throw e;
+    throw new Error(`${file.name}: this browser can't open this file type` +
+      (/\.hei[cf]$/i.test(file.name) ? " (HEIC: export it as JPEG first, or use Safari)" : ""));
+  }
   const s = Math.min(1, WORK_EDGE / Math.max(bmp.width, bmp.height));
-  if (s < 1) {
+  if (s < 1 || orient > 1) {
+    const w = Math.round(bmp.width * s), h = Math.round(bmp.height * s), swap = orient >= 5;
     const c = document.createElement("canvas");
-    c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
+    c.width = swap ? h : w; c.height = swap ? w : h;
     const ctx = c.getContext("2d"); ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(bmp, 0, 0, c.width, c.height); bmp.close();
+    const T = { 2: [-1, 0, 0, 1, w, 0], 3: [-1, 0, 0, -1, w, h], 4: [1, 0, 0, -1, 0, h], 5: [0, 1, 1, 0, 0, 0],
+                6: [0, 1, -1, 0, h, 0], 7: [0, -1, -1, 0, h, w], 8: [0, -1, 1, 0, 0, w] }[orient];
+    if (T) ctx.setTransform(...T);
+    ctx.drawImage(bmp, 0, 0, w, h); bmp.close();
     bmp = await createImageBitmap(c);
   }
-  return { id: ++uid, name: file.name, bmp, w: bmp.width, h: bmp.height, zoom: 1, cx: .5, cy: .5, ev: 0,
+  return { id: ++uid, name: file.name, note, bmp, w: bmp.width, h: bmp.height, zoom: 1, cx: .5, cy: .5, ev: 0,
            mask: null, maskState: "none" };
 }
 async function placeFiles(files, startSlot) {
-  files = [...files].filter(f => f.type.startsWith("image/") || /\.(hei[cf]|jpe?g|png|webp)$/i.test(f.name));
+  files = [...files].filter(f => f.type.startsWith("image/") || RAW_EXT.test(f.name) || /\.(hei[cf]|jpe?g|png|webp|tiff?)$/i.test(f.name));
   if (!files.length) return;
   const vis = visibleSlots();
   const targets = [];
@@ -722,6 +824,7 @@ function wireSlot(el, i) {
   el.addEventListener("drop", e => { e.preventDefault(); e.stopPropagation(); el.classList.remove("drop");
     placeFiles(e.dataTransfer.files, i); });
 }
+$("fileInput").accept = "image/*," + RAW_ACCEPT;
 $("main").addEventListener("dragover", e => e.preventDefault());
 $("main").addEventListener("drop", e => { e.preventDefault(); placeFiles(e.dataTransfer.files, null); });
 
@@ -745,6 +848,8 @@ function select(i) {
 function syncPhotoPanel() {
   const p = state.slots[state.selected]; if (!p) return;
   $("pName").textContent = `Frame ${Math.floor(state.selected / 4) + 1}·${state.selected % 4 + 1} — ${p.name}`;
+  $("pName").title = p.note || "";
+  $("pNote").textContent = p.note || "";
   $("pZoom").value = p.zoom; $("pZoomV").textContent = p.zoom.toFixed(2) + "×";
   $("pEv").value = p.ev; $("pEvV").textContent = (p.ev > 0 ? "+" : "") + p.ev.toFixed(2);
 }
