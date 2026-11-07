@@ -102,7 +102,9 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
     <div class="seg" id="stripsSeg"></div>
     <span class="lbl">Position on the page</span>
     <div class="seg" id="alignSeg"></div>
-    <label class="check"><input type="checkbox" id="cutToggle"> Cutting lines <span>(dotted, equal margins)</span></label>
+    <label class="check"><input type="checkbox" id="cutToggle"> Cutting lines <span>(dotted)</span></label>
+    <div class="row"><label title="Space your printer can't print on. Everything stays inside it.">Printer margin</label><input type="range" id="printMargin" min="0" max="15" step="0.5"><output id="printMarginV"></output></div>
+    <p class="note" style="margin-top:0">Keeps photos and cut lines inside the area your printer can print. 5–6 mm suits most inkjets; raise it if lines get cut off.</p>
     <span class="lbl">Caption under each strip (optional)</span>
     <input type="text" id="caption" maxlength="40" placeholder="e.g. RAHUL &amp; PRIYA · 07.11.26">
     <div class="btns" style="margin-top:10px">
@@ -182,15 +184,11 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
 // Geometry (PDF points, A4 landscape) — measured from the sample sheet
 // ============================================================================
 const PAGE = { w: 842, h: 595 };
-const FR = { w: 186, h: 123.5, gap: 7.5 };
-const CUT = FR.gap;                                       // equal cutting margin around each strip (= gap between photos)
-const PITCH = FR.w + 2 * CUT;                             // neighbouring strips share one cut line
-const STRIP_H = 4 * FR.h + 3 * FR.gap;
-const CAP_BAND = 16;                                      // extra room below the photos when there is a caption
+const FR = { w: 186, h: 123.5, gap: 7.5 };                // full-size frame (pt); shrinks only if the printer margin needs it
+const MIN_FOOTER = 22;                                    // minimum room below the photos for the caption (pt)
 const CUT_LINE = { width: .75, dash: [.75, 1.5], opacity: .2 };   // 1 px dotted, 20% (pt)
 const ASPECT = FR.w / FR.h;
 const EXPORT_PPI = 300;
-const EW = Math.round(FR.w / 72 * EXPORT_PPI), EH = Math.round(FR.h / 72 * EXPORT_PPI);
 const CAP_SIZE = 8;                                       // caption size, pt
 const WORK_EDGE = 2400;                                   // photos are kept at this long edge
 
@@ -227,7 +225,7 @@ const MP_MODEL = "https://storage.googleapis.com/mediapipe-models/image_segmente
 // State
 // ============================================================================
 const state = {
-  strips: 2, align: "right", caption: "", cutLines: true,
+  strips: 2, align: "right", caption: "", cutLines: true, printMargin: 6,
   slots: Array(16).fill(null),     // slot = strip*4 + row
   selected: -1, original: false,
   S: { ...DEFAULTS },
@@ -236,11 +234,11 @@ try {
   const saved = JSON.parse(localStorage.getItem("photostrips-settings") || "null");
   if (saved) { Object.assign(state.S, saved.S || {}); Object.assign(state, {
     strips: saved.strips ?? state.strips, align: saved.align ?? state.align, caption: saved.caption ?? "",
-    cutLines: saved.cutLines ?? true }); }
+    cutLines: saved.cutLines ?? true, printMargin: saved.printMargin ?? 6 }); }
 } catch {}
 function saveSettings() {
   try { localStorage.setItem("photostrips-settings",
-    JSON.stringify({ S: state.S, strips: state.strips, align: state.align, caption: state.caption, cutLines: state.cutLines })); } catch {}
+    JSON.stringify({ S: state.S, strips: state.strips, align: state.align, caption: state.caption, cutLines: state.cutLines, printMargin: state.printMargin })); } catch {}
 }
 
 const $ = id => document.getElementById(id);
@@ -251,25 +249,33 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 // ============================================================================
 // Layout helpers
 // ============================================================================
-// Strips sit in cut boxes with equal margins; the block is centred vertically and
-// left/right alignment keeps the outer cut lines inside the printable area.
+// Everything (photos and cut lines) stays inside the printer margin ("safe area").
+// Each strip: cut line at the top of the safe area, equal margins on the top and sides,
+// and a footer (for the caption) that runs down to the bottom of the safe area.
+// Frames shrink only when a large printer margin leaves too little room for 4 strips.
 function geom() {
-  const n = state.strips, capBand = state.caption.trim() ? CAP_BAND : 0;
-  const boxW = n * PITCH, boxH = STRIP_H + 2 * CUT + capBand;
-  const side = (PAGE.w - 4 * PITCH) / 2;
+  const safe = state.printMargin * 72 / 25.4;
+  const availW = PAGE.w - 2 * safe, availH = PAGE.h - 2 * safe;
+  const k = Math.min(1, availW / (4 * (FR.w + 2 * FR.gap)),
+                        availH / (4 * FR.h + 3 * FR.gap + FR.gap + MIN_FOOTER));
+  const fw = FR.w * k, fh = FR.h * k, gap = FR.gap * k, cut = gap, pitch = fw + 2 * cut;
+  const n = state.strips, boxW = n * pitch;
+  const side = (PAGE.w - 4 * pitch) / 2;
   const left = state.align === "left" ? side : state.align === "right" ? PAGE.w - side - boxW : (PAGE.w - boxW) / 2;
-  const top = (PAGE.h - boxH) / 2;
-  return { left, top, boxW, boxH, frameTop: top + CUT, capY: top + CUT + STRIP_H + 11 };
+  const top = safe, bottom = PAGE.h - safe, frameTop = top + cut;
+  const footerTop = frameTop + 4 * fh + 3 * gap;
+  return { k, fw, fh, gap, cut, pitch, left, top, bottom, boxW, frameTop,
+           capY: (footerTop + bottom) / 2 + CAP_SIZE * .35 };
 }
-function stripX(j) { return geom().left + j * PITCH + CUT; }
+function stripX(j) { const g = geom(); return g.left + j * g.pitch + g.cut; }
 function cutLines() {
   if (!state.cutLines) return { xs: [], ys: [] };
   const g = geom();
-  return { xs: [...Array(state.strips + 1)].map((_, j) => g.left + j * PITCH), ys: [g.top, g.top + g.boxH] };
+  return { xs: [...Array(state.strips + 1)].map((_, j) => g.left + j * g.pitch), ys: [g.top, g.bottom] };
 }
 function frameRect(i) {
-  const j = Math.floor(i / 4), r = i % 4;
-  return { x: stripX(j), y: geom().frameTop + r * (FR.h + FR.gap), w: FR.w, h: FR.h };
+  const j = Math.floor(i / 4), r = i % 4, g = geom();
+  return { x: stripX(j), y: g.frameTop + r * (g.fh + g.gap), w: g.fw, h: g.fh };
 }
 function visibleSlots() {
   const v = [];
@@ -744,7 +750,7 @@ function buildSheet() {
   }
   if (state.caption.trim()) for (let j = 0; j < state.strips; j++) {
     const c = document.createElement("div"); c.className = "cap"; c.textContent = state.caption;
-    Object.assign(c.style, { left: stripX(j) / PAGE.w * 100 + "%", width: FR.w / PAGE.w * 100 + "%",
+    Object.assign(c.style, { left: stripX(j) / PAGE.w * 100 + "%", width: geom().fw / PAGE.w * 100 + "%",
       top: (geom().capY - CAP_SIZE * .8) / PAGE.h * 100 + "%" });
     sheet.appendChild(c);
   }
@@ -955,6 +961,9 @@ const cmpOff = () => { if (state.original) { state.original = false; scheduleRen
 cmp.addEventListener("pointerdown", cmpOn); cmp.addEventListener("pointerup", cmpOff); cmp.addEventListener("pointerleave", cmpOff);
 
 $("cutToggle").checked = state.cutLines;
+$("printMargin").value = state.printMargin; $("printMarginV").textContent = state.printMargin + " mm";
+$("printMargin").addEventListener("input", e => { state.printMargin = +e.target.value;
+  $("printMarginV").textContent = state.printMargin + " mm"; buildSheet(); saveSettings(); });
 $("cutToggle").addEventListener("change", e => { state.cutLines = e.target.checked; buildSheet(); saveSettings(); });
 $("caption").value = state.caption;
 $("caption").addEventListener("input", e => { state.caption = e.target.value; buildSheet(); saveSettings(); });
@@ -975,12 +984,13 @@ async function renderExportFrames() {
     setExportStatus("Waiting for people detection to finish…"); await segQueue;
   }
   const wasOriginal = state.original; state.original = false;
+  const g = geom(), EW = Math.round(g.fw / 72 * EXPORT_PPI), EH = Math.round(g.fh / 72 * EXPORT_PPI);
   let n = 0;
   for (const i of filled) {
     setExportStatus(`Rendering frame ${++n} of ${filled.length} at 300 ppi…`); await tick();
     const c = document.createElement("canvas");
     renderInto(c, state.slots[i], EW, EH, { sharpen: PAPER[state.S.paper].sharpen });
-    list.push({ rect: frameRect(i), canvas: c });
+    list.push({ rect: frameRect(i), canvas: c, w: EW, h: EH });
   }
   state.original = wasOriginal;
   return { list, empty: vis.length - filled.length };
@@ -990,7 +1000,7 @@ function captionItems() {
   const m = document.createElement("canvas").getContext("2d");
   m.font = `${CAP_SIZE}px Helvetica, Arial, sans-serif`;
   const w = m.measureText(t).width + (t.length - 1) * CAP_SIZE * .06;
-  return [...Array(state.strips)].map((_, j) => ({ x: stripX(j) + (FR.w - w) / 2, y: geom().capY, text: t, w }));
+  return [...Array(state.strips)].map((_, j) => ({ x: stripX(j) + (geom().fw - w) / 2, y: geom().capY, text: t, w }));
 }
 function emptyNote(empty) { return empty ? ` (${empty} empty frame${empty > 1 ? "s" : ""} left blank)` : ""; }
 function download(blob, name) {
@@ -1047,9 +1057,9 @@ $("pdfBtn").onclick = async () => {
     const { list, empty } = await renderExportFrames();
     setExportStatus("Building PDF…"); await tick();
     const frames = [];
-    for (const f of list) frames.push({ rect: f.rect, w: EW, h: EH, bytes: new Uint8Array(await (await toJpeg(f.canvas)).arrayBuffer()) });
+    for (const f of list) frames.push({ rect: f.rect, w: f.w, h: f.h, bytes: new Uint8Array(await (await toJpeg(f.canvas)).arrayBuffer()) });
     download(makePDF(frames, captionItems()), `photo-strips-${stamp()}.pdf`);
-    setExportStatus("PDF downloaded. Print at 100% / Actual size, no scaling." + emptyNote(empty), "ok");
+    setExportStatus("PDF downloaded. In the print dialog pick A4, landscape and \"Actual size\" / 100% (not \"Fit\"): the printer margin is already built in." + emptyNote(empty), "ok");
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
 };
@@ -1094,7 +1104,7 @@ $("printBtn").onclick = async () => {
     for (const x of cl.xs) { const l = document.createElement("div"); l.className = "cut v"; l.style.left = x + "pt"; box.appendChild(l); }
     for (const y of cl.ys) { const l = document.createElement("div"); l.className = "cut h"; l.style.top = y + "pt"; box.appendChild(l); }
     await Promise.all(loads);
-    setExportStatus("In the print dialog choose A4, landscape, scale 100%, no margins." + emptyNote(empty), "ok");
+    setExportStatus("In the print dialog choose A4, landscape, scale 100% and margins \"None\": the printer margin is already built in." + emptyNote(empty), "ok");
     window.print();
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
