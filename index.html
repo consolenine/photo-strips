@@ -79,17 +79,17 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
   aside{width:auto;height:auto;border-right:0;border-bottom:1px solid var(--line)}
   main{min-height:70vh}
 }
-@page{size:A4 landscape;margin:0}
 @media print{
   body{display:block;background:#fff}
   body>*:not(#print){display:none!important}
-  #print{display:block!important;position:relative;width:842pt;height:595pt;overflow:hidden}
+  #print{display:block!important;position:relative;overflow:hidden}
   #print img{position:absolute;display:block}
   #print .cut.v{top:0;bottom:0;width:0;border-left:.75pt dotted rgba(0,0,0,.2)}
   #print .cut.h{left:0;right:0;height:0;border-top:.75pt dotted rgba(0,0,0,.2)}
   #print div{position:absolute;text-align:center;color:#444;letter-spacing:.06em;font-family:Helvetica,Arial,sans-serif}
 }
 </style>
+<style id="pageStyle">@page{size:A4 landscape;margin:0}</style>
 </head>
 <body>
 <aside>
@@ -98,6 +98,8 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
 
   <section>
     <h2>Layout</h2>
+    <span class="lbl">Page size (landscape)</span>
+    <div class="seg" id="pageSeg"></div>
     <span class="lbl">Number of strips</span>
     <div class="seg" id="stripsSeg"></div>
     <span class="lbl">Position on the page</span>
@@ -161,7 +163,7 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
   </section>
 
   <section>
-    <h2>Export · A4, 300 ppi</h2>
+    <h2 id="exportHead">Export · A4, 300 ppi</h2>
     <div class="btns">
       <button class="btn primary" id="pdfBtn">Download PDF</button>
       <button class="btn" id="jpgBtn">JPEG</button>
@@ -181,9 +183,10 @@ input[type=text]{width:100%;padding:7px 9px;border:1px solid var(--line);border-
 
 <script type="module">
 // ============================================================================
-// Geometry (PDF points, A4 landscape) — measured from the sample sheet
+// Geometry (PDF points, landscape) — frame proportions measured from the sample A4 sheet
 // ============================================================================
-const PAGE = { w: 842, h: 595 };
+const PAGES = { A4: { w: 842, h: 595 }, A5: { w: 595.28, h: 419.53 } };
+let PAGE = PAGES.A4;                                      // set from state.page (A4 or A5); frames scale to fit
 const FR = { w: 186, h: 123.5, gap: 7.5 };                // full-size frame (pt); shrinks only if the printer margin needs it
 const MIN_FOOTER = 22;                                    // minimum room below the photos for the caption (pt)
 const BOTTOM_CUT = 1.5;                                   // bottom cut line sits 2 px (1.5 pt) above the page's bottom edge
@@ -226,7 +229,7 @@ const MP_MODEL = "https://storage.googleapis.com/mediapipe-models/image_segmente
 // State
 // ============================================================================
 const state = {
-  strips: 2, align: "right", caption: "", cutLines: true, printMargin: 6,
+  page: "A4", strips: 2, align: "right", caption: "", cutLines: true, printMargin: 6,
   slots: Array(16).fill(null),     // slot = strip*4 + row
   selected: -1, original: false,
   S: { ...DEFAULTS },
@@ -235,11 +238,11 @@ try {
   const saved = JSON.parse(localStorage.getItem("photostrips-settings") || "null");
   if (saved) { Object.assign(state.S, saved.S || {}); Object.assign(state, {
     strips: saved.strips ?? state.strips, align: saved.align ?? state.align, caption: saved.caption ?? "",
-    cutLines: saved.cutLines ?? true, printMargin: saved.printMargin ?? 6 }); }
+    cutLines: saved.cutLines ?? true, printMargin: saved.printMargin ?? 6, page: PAGES[saved.page] ? saved.page : "A4" }); }
 } catch {}
 function saveSettings() {
   try { localStorage.setItem("photostrips-settings",
-    JSON.stringify({ S: state.S, strips: state.strips, align: state.align, caption: state.caption, cutLines: state.cutLines, printMargin: state.printMargin })); } catch {}
+    JSON.stringify({ S: state.S, strips: state.strips, align: state.align, caption: state.caption, cutLines: state.cutLines, printMargin: state.printMargin, page: state.page })); } catch {}
 }
 
 const $ = id => document.getElementById(id);
@@ -891,6 +894,15 @@ function segmented(id, options, get, set) {
     } };
   draw(); return draw;
 }
+function applyPage() {
+  PAGE = PAGES[state.page];
+  $("pageStyle").textContent = `@page{size:${state.page} landscape;margin:0}
+    @media print{#print{width:${PAGE.w}pt;height:${PAGE.h}pt}}`;
+  $("exportHead").textContent = `Export · ${state.page}, 300 ppi`;
+}
+applyPage();
+segmented("pageSeg", [["A4", "A4"], ["A5", "A5"]], () => state.page, v => {
+  state.page = v; applyPage(); buildSheet(); saveSettings(); });
 segmented("stripsSeg", [[1, "1"], [2, "2"], [3, "3"], [4, "4"]], () => state.strips, v => {
   state.strips = v; if (state.selected >= 0 && !visibleSlots().includes(state.selected)) select(-1);
   buildSheet(); saveSettings(); });
@@ -1010,7 +1022,7 @@ function download(blob, name) {
 }
 const stamp = () => new Date().toISOString().slice(0, 10);
 
-// Minimal PDF writer: one A4 page, JPEG images (embedded as-is) + Helvetica captions
+// Minimal PDF writer: one page (A4/A5), JPEG images (embedded as-is) + Helvetica captions
 function makePDF(frames, caps) {
   const te = new TextEncoder(), chunks = []; let len = 0; const offs = [];
   const push = x => { const b = typeof x === "string" ? te.encode(x) : x; chunks.push(b); len += b.length; };
@@ -1059,8 +1071,8 @@ $("pdfBtn").onclick = async () => {
     setExportStatus("Building PDF…"); await tick();
     const frames = [];
     for (const f of list) frames.push({ rect: f.rect, w: f.w, h: f.h, bytes: new Uint8Array(await (await toJpeg(f.canvas)).arrayBuffer()) });
-    download(makePDF(frames, captionItems()), `photo-strips-${stamp()}.pdf`);
-    setExportStatus("PDF downloaded (A4 landscape)." + emptyNote(empty), "ok");
+    download(makePDF(frames, captionItems()), `photo-strips-${state.page}-${stamp()}.pdf`);
+    setExportStatus(`PDF downloaded (${state.page} landscape).` + emptyNote(empty), "ok");
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
 };
@@ -1081,8 +1093,8 @@ $("jpgBtn").onclick = async () => {
     for (const x of cl.xs) { ctx.moveTo(x * k, 0); ctx.lineTo(x * k, c.height); }
     for (const y of cl.ys) { ctx.moveTo(0, y * k); ctx.lineTo(c.width, y * k); }
     ctx.stroke();
-    download(await toJpeg(c, .95), `photo-strips-${stamp()}.jpg`);
-    setExportStatus("JPEG downloaded (A4 at 300 ppi)." + emptyNote(empty), "ok");
+    download(await toJpeg(c, .95), `photo-strips-${state.page}-${stamp()}.jpg`);
+    setExportStatus(`JPEG downloaded (${state.page} at 300 ppi).` + emptyNote(empty), "ok");
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
 };
@@ -1105,7 +1117,7 @@ $("printBtn").onclick = async () => {
     for (const x of cl.xs) { const l = document.createElement("div"); l.className = "cut v"; l.style.left = x + "pt"; box.appendChild(l); }
     for (const y of cl.ys) { const l = document.createElement("div"); l.className = "cut h"; l.style.top = y + "pt"; box.appendChild(l); }
     await Promise.all(loads);
-    setExportStatus("In the print dialog choose A4, landscape." + emptyNote(empty), "ok");
+    setExportStatus(`In the print dialog choose ${state.page}, landscape.` + emptyNote(empty), "ok");
     window.print();
   } catch (e) { setExportStatus(e.message, "err"); }
   setBusy(false);
